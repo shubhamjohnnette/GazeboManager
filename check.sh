@@ -51,22 +51,83 @@ find_target_dir() {
     return 1
 }
 
+# Helper function to check if running in WSL (Windows Subsystem for Linux)
+is_wsl() {
+    if [ -n "$WSL_DISTRO_NAME" ] || [ -n "$WSL_INTEROP" ]; then
+        return 0
+    elif [ -f /proc/version ] && grep -qi "microsoft" /proc/version; then
+        return 0
+    elif [ -f /proc/sys/kernel/osrelease ] && grep -qi "microsoft" /proc/sys/kernel/osrelease; then
+        return 0
+    fi
+    return 1
+}
+
+# Helper function to setup GUI DISPLAY and OpenGL environment variables for WSL
+setup_wsl_gui_env() {
+    if is_wsl; then
+        if [ -z "$DISPLAY" ] && [ -z "$WAYLAND_DISPLAY" ]; then
+            local host_ip
+            host_ip=$(ip route show default 2>/dev/null | awk '{print $3}')
+            if [ -n "$host_ip" ]; then
+                export DISPLAY="${host_ip}:0"
+            else
+                export DISPLAY=":0"
+            fi
+            echo "[WSL INFO] DISPLAY variable automatically set to $DISPLAY for GUI support."
+        fi
+
+        # OpenGL compatibility settings for Gazebo (GZ Sim) & Mesa under WSL
+        if [ -z "$MESA_GL_VERSION_OVERRIDE" ]; then
+            export MESA_GL_VERSION_OVERRIDE=3.3
+        fi
+        export LIBGL_ALWAYS_INDIRECT=0
+    fi
+}
+
 # Helper function to launch a command in a new terminal window
 launch_in_new_terminal() {
     local cmd="$1"
     local title="${2:-Gazebo Simulation}"
-    
+    local tmp_script="/tmp/launch_gz_mgr_$$.sh"
+
+    cat << EOF > "$tmp_script"
+#!/bin/bash
+$cmd
+exec bash
+EOF
+    chmod +x "$tmp_script"
+
+    if is_wsl; then
+        setup_wsl_gui_env
+        local distro_flag=""
+        if [ -n "$WSL_DISTRO_NAME" ]; then
+            distro_flag="-d $WSL_DISTRO_NAME"
+        fi
+
+        if command -v wt.exe &>/dev/null; then
+            wt.exe --title "$title" wsl.exe $distro_flag bash "$tmp_script" &
+            return 0
+        elif command -v cmd.exe &>/dev/null; then
+            cmd.exe /c start "$title" wsl.exe $distro_flag bash "$tmp_script" &
+            return 0
+        elif command -v powershell.exe &>/dev/null; then
+            powershell.exe -Command "Start-Process wsl.exe -ArgumentList '$distro_flag bash \"$tmp_script\"'" &
+            return 0
+        fi
+    fi
+
     if command -v gnome-terminal &>/dev/null; then
-        gnome-terminal --title="$title" -- bash -c "$cmd; exec bash" &
+        gnome-terminal --title="$title" -- bash "$tmp_script" &
     elif command -v xfce4-terminal &>/dev/null; then
-        xfce4-terminal --title="$title" -e "bash -c \"$cmd; exec bash\"" &
+        xfce4-terminal --title="$title" -e "bash \"$tmp_script\"" &
     elif command -v konsole &>/dev/null; then
-        konsole --title="$title" -e bash -c "$cmd; exec bash" &
+        konsole --title="$title" -e bash "$tmp_script" &
     elif command -v xterm &>/dev/null; then
-        xterm -T "$title" -e "bash -c \"$cmd; exec bash\"" &
+        xterm -T "$title" -e "bash \"$tmp_script\"" &
     else
         echo "[WARNING] Terminal emulator not detected. Launching in current terminal..."
-        eval "$cmd"
+        bash "$tmp_script"
     fi
 }
 
@@ -94,16 +155,44 @@ run_setup_gazebo() {
     fi
 }
 
+# Function to download or update official ArduPilot SITL_Models
+download_sitl_models() {
+    echo "================================"
+    echo "Downloading / Updating Official ArduPilot SITL_Models..."
+    echo "================================"
+    local target_dir="${SITL_MODELS_DIR:-$HOME/SITL_Models}"
+    
+    if [ ! -d "$target_dir" ]; then
+        echo "Cloning official ArduPilot SITL_Models repository to $target_dir..."
+        git clone https://github.com/ArduPilot/SITL_Models.git "$target_dir"
+    else
+        echo "Updating official ArduPilot SITL_Models repository at $target_dir..."
+        git -C "$target_dir" pull
+    fi
+    
+    SITL_MODELS_DIR="$target_dir"
+    auto_fix_gazebo
+    echo "================================"
+    echo "[SUCCESS] Official ArduPilot SITL_Models repository updated successfully!"
+    echo "================================"
+}
+
 # Function to automatically fix Gazebo environment variables in ~/.bashrc
 auto_fix_gazebo() {
     if [ -n "$GAZEBO_DIR" ]; then
         echo "[AUTO-FIX] Updating ~/.bashrc with correct Gazebo paths..."
         sed -i '/GZ_SIM_SYSTEM_PLUGIN_PATH/d' "$BASHRC" 2>/dev/null
         sed -i '/GZ_SIM_RESOURCE_PATH/d' "$BASHRC" 2>/dev/null
+        
+        local res_path="$GAZEBO_DIR/models:$GAZEBO_DIR/worlds"
+        if [ -n "$SITL_MODELS_DIR" ] && [ -d "$SITL_MODELS_DIR/Gazebo" ]; then
+            res_path="$res_path:$SITL_MODELS_DIR/Gazebo/models:$SITL_MODELS_DIR/Gazebo/worlds"
+        fi
+
         echo "export GZ_SIM_SYSTEM_PLUGIN_PATH=$GAZEBO_DIR/build:\$GZ_SIM_SYSTEM_PLUGIN_PATH" >> "$BASHRC"
-        echo "export GZ_SIM_RESOURCE_PATH=$GAZEBO_DIR/models:$GAZEBO_DIR/worlds:\$GZ_SIM_RESOURCE_PATH" >> "$BASHRC"
+        echo "export GZ_SIM_RESOURCE_PATH=$res_path:\$GZ_SIM_RESOURCE_PATH" >> "$BASHRC"
         export GZ_SIM_SYSTEM_PLUGIN_PATH="$GAZEBO_DIR/build:$GZ_SIM_SYSTEM_PLUGIN_PATH"
-        export GZ_SIM_RESOURCE_PATH="$GAZEBO_DIR/models:$GAZEBO_DIR/worlds:$GZ_SIM_RESOURCE_PATH"
+        export GZ_SIM_RESOURCE_PATH="$res_path:$GZ_SIM_RESOURCE_PATH"
         echo "[AUTO-FIX] ~/.bashrc updated and environment exported successfully!"
         PLUGIN_OK=true
         RESOURCE_OK=true
@@ -172,16 +261,43 @@ launch_sitl() {
     
     local vehicle="ArduPlane"
     local frame="gazebo-zephyr"
-    local param_file="$GAZEBO_DIR/config/gazebo-zephyr-gimbal.parm"
-    
-    if [[ "$SELECTED_WORLD" =~ iris ]]; then
+    local param_file=""
+
+    # Check SITL_Models configs first for matching parameter file
+    if [ -n "$SITL_MODELS_DIR" ] && [ -d "$SITL_MODELS_DIR/Gazebo/config" ]; then
+        for pfile in "$SITL_MODELS_DIR/Gazebo/config"/*.param; do
+            [ -f "$pfile" ] || continue
+            local pbase=$(basename "$pfile" .param)
+            if [[ "$SELECTED_WORLD" =~ "$pbase" ]]; then
+                param_file="$pfile"
+                break
+            fi
+        done
+    fi
+
+    # Determine vehicle type and frame based on selected world name
+    if [[ "$SELECTED_WORLD" =~ (rover|r1_rover|sawppy|lawnmower|catamaran|blueboat|omni|wildthumper|truck|daf) ]]; then
+        vehicle="ArduRover"
+        frame="gazebo-rover"
+    elif [[ "$SELECTED_WORLD" =~ (iris|hexapod|bicopter|quadruped) ]]; then
         vehicle="ArduCopter"
         frame="gazebo-iris"
-        param_file="$GAZEBO_DIR/config/gazebo-iris-gimbal.parm"
+    elif [[ "$SELECTED_WORLD" =~ (zephyr|skywalker|vtail|swan|alti|skycat|wsc) ]]; then
+        vehicle="ArduPlane"
+        frame="gazebo-zephyr"
+    fi
+
+    # Fallback to ardupilot_gazebo parameter files if not matched in SITL_Models
+    if [ -z "$param_file" ]; then
+        if [[ "$SELECTED_WORLD" =~ iris ]]; then
+            param_file="$GAZEBO_DIR/config/gazebo-iris-gimbal.parm"
+        elif [[ "$SELECTED_WORLD" =~ zephyr ]]; then
+            param_file="$GAZEBO_DIR/config/gazebo-zephyr-gimbal.parm"
+        fi
     fi
     
     local param_arg=""
-    if [ -f "$param_file" ]; then
+    if [ -n "$param_file" ] && [ -f "$param_file" ]; then
         param_arg="--add-param-file=$param_file"
     fi
     
@@ -190,18 +306,23 @@ launch_sitl() {
     echo "================================"
     echo "Launching SITL in a new terminal window..."
     echo "Vehicle: $vehicle | Frame: $frame"
+    [ -n "$param_file" ] && echo "Param File: $param_file"
     echo "Command: $sitl_cmd"
     echo "================================"
     
     launch_in_new_terminal "$sitl_cmd" "ArduPilot SITL - $vehicle"
 }
 
+# Initialize WSL GUI environment if running on WSL
+setup_wsl_gui_env
+
 echo "================================"
-echo "Scanning for ardupilot_gazebo..."
+echo "Scanning for ardupilot_gazebo & SITL_Models..."
 echo "================================"
 
-# Step 1: Scan disk for ardupilot_gazebo first
+# Step 1: Scan disk for ardupilot_gazebo and SITL_Models
 GAZEBO_DIR=$(find_target_dir "ardupilot_gazebo")
+SITL_MODELS_DIR=$(find_target_dir "SITL_Models")
 
 if [ -n "$GAZEBO_DIR" ]; then
     echo "FOUND ardupilot_gazebo directory at: $GAZEBO_DIR"
@@ -215,6 +336,19 @@ else
     read -p "Would you like to run setup_gazebo.sh to install & configure Gazebo automatically? [y/N]: " SETUP_NOW
     if [[ "$SETUP_NOW" =~ ^[Yy]$ ]]; then
         run_setup_gazebo
+    fi
+fi
+
+echo ""
+if [ -n "$SITL_MODELS_DIR" ]; then
+    echo "FOUND official ArduPilot SITL_Models directory at: $SITL_MODELS_DIR"
+    [ -d "$SITL_MODELS_DIR/Gazebo/models" ] && echo "  - models directory: FOUND ($SITL_MODELS_DIR/Gazebo/models)" || echo "  - models directory: NOT FOUND ($SITL_MODELS_DIR/Gazebo/models)"
+    [ -d "$SITL_MODELS_DIR/Gazebo/worlds" ] && echo "  - worlds directory: FOUND ($SITL_MODELS_DIR/Gazebo/worlds)" || echo "  - worlds directory: NOT FOUND ($SITL_MODELS_DIR/Gazebo/worlds)"
+else
+    echo "NOT FOUND: official ArduPilot SITL_Models directory in $HOME, $HOME/JSetup, or child directories."
+    read -p "Would you like to download official ArduPilot SITL_Models repository now? [y/N]: " DL_SITL_NOW
+    if [[ "$DL_SITL_NOW" =~ ^[Yy]$ ]]; then
+        download_sitl_models
     fi
 fi
 
@@ -347,39 +481,56 @@ echo "================================"
 
 # If Gazebo configuration is valid, prompt user to select and launch a model/world
 if [ "$PLUGIN_OK" = true ] && [ "$RESOURCE_OK" = true ] && [ -n "$GAZEBO_DIR" ]; then
-    WORLDS=()
+    WORLDS_DISPLAY=()
+    WORLD_FILES=()
+
     if [ -d "$GAZEBO_DIR/worlds" ]; then
         for w in "$GAZEBO_DIR/worlds"/*.sdf; do
             [ -f "$w" ] || continue
-            WORLDS+=("$(basename "$w")")
+            WORLDS_DISPLAY+=("[ardupilot_gazebo] $(basename "$w")")
+            WORLD_FILES+=("$(basename "$w")")
         done
     fi
 
-    if [ ${#WORLDS[@]} -gt 0 ]; then
+    if [ -n "$SITL_MODELS_DIR" ] && [ -d "$SITL_MODELS_DIR/Gazebo/worlds" ]; then
+        for w in "$SITL_MODELS_DIR/Gazebo/worlds"/*.sdf; do
+            [ -f "$w" ] || continue
+            WORLDS_DISPLAY+=("[SITL_Models] $(basename "$w")")
+            WORLD_FILES+=("$(basename "$w")")
+        done
+    fi
+
+    if [ ${#WORLDS_DISPLAY[@]} -gt 0 ]; then
         echo ""
         echo "================================"
         echo "Available Gazebo Simulation Models / Worlds:"
         echo "================================"
-        for i in "${!WORLDS[@]}"; do
+        for i in "${!WORLDS_DISPLAY[@]}"; do
             num=$((i+1))
-            echo "  $num) ${WORLDS[$i]}"
+            echo "  $num) ${WORLDS_DISPLAY[$i]}"
         done
         echo "  0) Exit without launching"
         echo "================================"
         
-        read -p "Enter option number to launch Gazebo [1-${#WORLDS[@]}]: " CHOICE
+        read -p "Enter option number to launch Gazebo [1-${#WORLDS_DISPLAY[@]}]: " CHOICE
         
-        if [[ "$CHOICE" =~ ^[0-9]+$ ]] && [ "$CHOICE" -ge 1 ] && [ "$CHOICE" -le "${#WORLDS[@]}" ]; then
+        if [[ "$CHOICE" =~ ^[0-9]+$ ]] && [ "$CHOICE" -ge 1 ] && [ "$CHOICE" -le "${#WORLDS_DISPLAY[@]}" ]; then
             INDEX=$((CHOICE-1))
-            SELECTED_WORLD="${WORLDS[$INDEX]}"
+            SELECTED_WORLD="${WORLD_FILES[$INDEX]}"
+            SELECTED_DISPLAY="${WORLDS_DISPLAY[$INDEX]}"
             echo ""
             echo "================================"
             echo "Launching Gazebo in a new terminal window..."
-            echo "Model/World: $SELECTED_WORLD"
+            echo "Model/World: $SELECTED_DISPLAY"
             echo "Command: gz sim -v4 -r \"$SELECTED_WORLD\""
             echo "================================"
             
-            LAUNCH_CMD="export GZ_SIM_SYSTEM_PLUGIN_PATH=\"$GAZEBO_DIR/build:\$GZ_SIM_SYSTEM_PLUGIN_PATH\"; export GZ_SIM_RESOURCE_PATH=\"$GAZEBO_DIR/models:$GAZEBO_DIR/worlds:\$GZ_SIM_RESOURCE_PATH\"; gz sim -v4 -r \"$SELECTED_WORLD\""
+            LAUNCH_RESOURCE_PATH="$GAZEBO_DIR/models:$GAZEBO_DIR/worlds"
+            if [ -n "$SITL_MODELS_DIR" ] && [ -d "$SITL_MODELS_DIR/Gazebo" ]; then
+                LAUNCH_RESOURCE_PATH="$LAUNCH_RESOURCE_PATH:$SITL_MODELS_DIR/Gazebo/models:$SITL_MODELS_DIR/Gazebo/worlds"
+            fi
+
+            LAUNCH_CMD="export GZ_SIM_SYSTEM_PLUGIN_PATH=\"$GAZEBO_DIR/build:\$GZ_SIM_SYSTEM_PLUGIN_PATH\"; export GZ_SIM_RESOURCE_PATH=\"$LAUNCH_RESOURCE_PATH:\$GZ_SIM_RESOURCE_PATH\"; gz sim -v4 -r \"$SELECTED_WORLD\""
             
             launch_in_new_terminal "$LAUNCH_CMD" "Gazebo Sim - $SELECTED_WORLD"
             
@@ -391,20 +542,24 @@ if [ "$PLUGIN_OK" = true ] && [ "$RESOURCE_OK" = true ] && [ -n "$GAZEBO_DIR" ];
                 echo "What would you like to do next?"
                 echo "================================"
                 echo "  1) Launch SITL (ArduPilot simulation vehicle) in a new terminal"
-                echo "  2) Automatically Fix / Setup SITL (Install prerequisites & build SITL)"
-                echo "  3) Automatically Fix Gazebo paths in ~/.bashrc"
+                echo "  2) Download / Update Official ArduPilot SITL_Models repository"
+                echo "  3) Automatically Fix / Setup SITL (Install prerequisites & build SITL)"
+                echo "  4) Automatically Fix Gazebo paths in ~/.bashrc"
                 echo "  0) Exit"
                 echo "================================"
-                read -p "Select action [0-3]: " NEXT_ACTION
+                read -p "Select action [0-4]: " NEXT_ACTION
                 
                 case "$NEXT_ACTION" in
                     1)
                         launch_sitl
                         ;;
                     2)
-                        auto_fix_sitl
+                        download_sitl_models
                         ;;
                     3)
+                        auto_fix_sitl
+                        ;;
+                    4)
                         auto_fix_gazebo
                         ;;
                     0)
@@ -412,7 +567,7 @@ if [ "$PLUGIN_OK" = true ] && [ "$RESOURCE_OK" = true ] && [ -n "$GAZEBO_DIR" ];
                         break
                         ;;
                     *)
-                        echo "Invalid option. Please enter 0, 1, 2, or 3."
+                        echo "Invalid option. Please enter 0, 1, 2, 3, or 4."
                         ;;
                 esac
             done
@@ -423,7 +578,7 @@ if [ "$PLUGIN_OK" = true ] && [ "$RESOURCE_OK" = true ] && [ -n "$GAZEBO_DIR" ];
             echo "Invalid selection or no input provided. Skipping Gazebo launch."
         fi
     else
-        echo "No world (.sdf) files found in $GAZEBO_DIR/worlds."
+        echo "No world (.sdf) files found in Gazebo resource directories."
     fi
 fi
 
