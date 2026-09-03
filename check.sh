@@ -244,6 +244,42 @@ auto_fix_sitl() {
     ARDUPILOT_DIR="$target_dir"
 }
 
+# Helper function to check and kill any currently running Gazebo processes
+kill_existing_gazebo() {
+    local gazebo_pids
+    gazebo_pids=$(pgrep -f "gz sim|ign gazebo|gzserver|gzclient" 2>/dev/null || true)
+    if [ -n "$gazebo_pids" ]; then
+        echo "================================"
+        echo "[CHECK] Found active Gazebo process(es): $gazebo_pids"
+        echo "[KILL] Terminating existing Gazebo instance..."
+        echo "================================"
+        pkill -9 -f "gz sim" 2>/dev/null || true
+        pkill -9 -f "ign gazebo" 2>/dev/null || true
+        pkill -9 -f "gzserver" 2>/dev/null || true
+        pkill -9 -f "gzclient" 2>/dev/null || true
+        sleep 1
+    fi
+}
+
+# Helper function to check and kill any currently running ArduPilot SITL processes
+kill_existing_sitl() {
+    local sitl_pids
+    sitl_pids=$(pgrep -f "sim_vehicle.py|arduplane|arducopter|ardurover|ardusub|mavproxy.py" 2>/dev/null || true)
+    if [ -n "$sitl_pids" ]; then
+        echo "================================"
+        echo "[CHECK] Found active SITL process(es): $sitl_pids"
+        echo "[KILL] Terminating existing ArduPilot SITL instance..."
+        echo "================================"
+        pkill -9 -f "sim_vehicle.py" 2>/dev/null || true
+        pkill -9 -f "arduplane" 2>/dev/null || true
+        pkill -9 -f "arducopter" 2>/dev/null || true
+        pkill -9 -f "ardurover" 2>/dev/null || true
+        pkill -9 -f "ardusub" 2>/dev/null || true
+        pkill -9 -f "mavproxy.py" 2>/dev/null || true
+        sleep 1
+    fi
+}
+
 # Function to launch ArduPilot SITL in a new terminal window
 launch_sitl() {
     local target_dir="${ARDUPILOT_DIR:-$(find_target_dir "ardupilot")}"
@@ -303,6 +339,8 @@ launch_sitl() {
     
     local sitl_cmd="cd \"$target_dir\" && python3 Tools/autotest/sim_vehicle.py -v $vehicle -f $frame --model JSON $param_arg --console --map"
     
+    kill_existing_sitl
+
     echo "================================"
     echo "Launching SITL in a new terminal window..."
     echo "Vehicle: $vehicle | Frame: $frame"
@@ -508,6 +546,19 @@ show_fix_menu() {
     done
 }
 
+# Helper function to invoke setup_mediamtx.sh for MediaMTX management
+manage_mediamtx() {
+    local mtx_script="$SCRIPT_DIR/setup_mediamtx.sh"
+    if [ ! -f "$mtx_script" ]; then
+        mtx_script="$HOME/GazeboManager/setup_mediamtx.sh"
+    fi
+    if [ -f "$mtx_script" ]; then
+        bash "$mtx_script"
+    else
+        echo "[ERROR] setup_mediamtx.sh script not found at $mtx_script."
+    fi
+}
+
 # Function for Post-Launch Menu options when Gazebo is running
 post_launch_menu() {
     while true; do
@@ -520,21 +571,25 @@ post_launch_menu() {
         echo "What would you like to do next?"
         echo "================================"
         echo "  1) Launch SITL (ArduPilot simulation vehicle) in a new terminal"
-        echo "  2) Continue to launch (Select & launch another Gazebo model)"
-        echo "  3) Fix menu (Download models, Fix SITL, Fix Gazebo paths)"
+        echo "  2) Start / Manage MediaMTX RTSP Server in a new terminal"
+        echo "  3) Continue to launch (Select & launch another Gazebo model)"
+        echo "  4) Fix menu (Download models, Fix SITL, Fix Gazebo paths)"
         echo "  0) Exit"
         echo "================================"
-        read -p "Select action [0-3]: " NEXT_ACTION
+        read -p "Select action [0-4]: " NEXT_ACTION
         
         case "$NEXT_ACTION" in
             1)
                 launch_sitl
                 ;;
             2)
+                manage_mediamtx
+                ;;
+            3)
                 select_and_launch_gazebo
                 break
                 ;;
-            3)
+            4)
                 show_fix_menu
                 ;;
             0)
@@ -542,7 +597,7 @@ post_launch_menu() {
                 exit 0
                 ;;
             *)
-                echo "Invalid option. Please enter 0, 1, 2, or 3."
+                echo "Invalid option. Please enter 0, 1, 2, 3, or 4."
                 ;;
         esac
     done
@@ -624,6 +679,9 @@ select_and_launch_gazebo() {
             INDEX=$((CHOICE-1))
             SELECTED_WORLD="${WORLD_FILES[$INDEX]}"
             SELECTED_DISPLAY="${WORLDS_DISPLAY[$INDEX]}"
+            
+            kill_existing_gazebo
+
             echo ""
             echo "================================"
             echo "Launching Gazebo in a new terminal window..."
@@ -658,24 +716,28 @@ main_menu() {
         echo "What would you like to do?"
         echo "================================"
         echo "  1) Launch Gazebo"
-        echo "  2) Download / Update official models from official repos (SITL_Models)"
-        echo "  3) Fix / Setup SITL (Install prerequisites & build SITL)"
-        echo "  4) Fix Gazebo paths in ~/.bashrc"
+        echo "  2) MediaMTX Server (Start / Restart / Status in new terminal)"
+        echo "  3) Download / Update official models from official repos (SITL_Models)"
+        echo "  4) Fix / Setup SITL (Install prerequisites & build SITL)"
+        echo "  5) Fix Gazebo paths in ~/.bashrc"
         echo "  0) Exit"
         echo "================================"
-        read -p "Select option [0-4]: " MAIN_CHOICE
+        read -p "Select option [0-5]: " MAIN_CHOICE
 
         case "$MAIN_CHOICE" in
             1)
                 select_and_launch_gazebo
                 ;;
             2)
-                download_sitl_models
+                manage_mediamtx
                 ;;
             3)
-                auto_fix_sitl
+                download_sitl_models
                 ;;
             4)
+                auto_fix_sitl
+                ;;
+            5)
                 auto_fix_gazebo
                 ;;
             0)
@@ -683,7 +745,7 @@ main_menu() {
                 exit 0
                 ;;
             *)
-                echo "Invalid option. Please enter 0, 1, 2, 3, or 4."
+                echo "Invalid option. Please enter 0, 1, 2, 3, 4, or 5."
                 ;;
         esac
     done

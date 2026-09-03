@@ -1,26 +1,37 @@
-1. Install MediaMTX
+# MediaMTX Management & Setup
 
-2. Download MediaMTX
+## Quick Automated Setup & Check
+Run the automated script to check status, install, start MediaMTX server, and get your connection URL:
+
+```bash
+./setup_mediamtx.sh
+```
+
+---
+
+## Manual Installation Guide
+
+1. Download MediaMTX
+```bash
 cd /tmp
-
 wget https://github.com/bluenviron/mediamtx/releases/download/v1.20.1/mediamtx_v1.20.1_linux_amd64.tar.gz
-
 tar -xzf mediamtx_v1.20.1_linux_amd64.tar.gz
-
 sudo mv mediamtx /usr/local/bin/
 sudo mkdir -p /usr/local/etc
 sudo mv mediamtx.yml /usr/local/etc/
-
 mediamtx --version
+```
 
-
-4. Test MediaMTX manually
+2. Test MediaMTX manually
+```bash
 mediamtx /usr/local/etc/mediamtx.yml
+```
 
-5. Make it a system service
-
+3. Make it a system service
+```bash
 sudo tee /etc/systemd/system/mediamtx.service >/dev/null <<'EOF'
 [Unit]
+Description=MediaMTX RTSP / WebRTC Server
 After=network-online.target
 Wants=network-online.target
 
@@ -35,24 +46,24 @@ EOF
 sudo systemctl daemon-reload
 sudo systemctl enable mediamtx
 sudo systemctl start mediamtx
+```
 
-2. Most likely configuration: MPEG-TS over UDP
-
-If your Gazebo GStreamer pipeline is producing MPEG-TS, MediaMTX can directly consume it. The official configuration is udp+mpegts://....
-
-Edit:
-
-sudo nano /usr/local/etc/mediamtx.yml
-Find the paths: section. You can use:
-remeber yaml indentation matter 
-
+4. Configuration for FPV / Gazebo Stream
+Edit `/usr/local/etc/mediamtx.yml`:
+```yaml
 paths:
-  gazebo:
-    source: udp+mpegts://127.0.0.1:5600
+  all_others:
 
-Restart
+  fpv_stream:
+    source: publisher
+```
 
+Restart service:
+```bash
 sudo systemctl restart mediamtx
+```
 
-Test
-ffplay rtsp://127.0.0.1:8554/gazebo
+Test Stream Connection:
+```bash
+ffplay rtsp://<SYSTEM_IP>:8554/fpv_stream
+```
