@@ -474,17 +474,91 @@ else
     echo "  git clone https://github.com/ArduPilot/ardupilot.git ~/ardupilot"
 fi
 
-echo ""
-echo "================================"
-echo "Scan completed."
-echo "================================"
+# Function for Fix Menu options
+show_fix_menu() {
+    while true; do
+        echo ""
+        echo "================================"
+        echo "Fix & Setup Options:"
+        echo "================================"
+        echo "  1) Download / Update official models from official repos (SITL_Models)"
+        echo "  2) Automatically Fix / Setup SITL (Install prerequisites & build SITL)"
+        echo "  3) Automatically Fix Gazebo environment paths in ~/.bashrc"
+        echo "  0) Back to Previous Menu"
+        echo "================================"
+        read -p "Select fix option [0-3]: " FIX_CHOICE
+        
+        case "$FIX_CHOICE" in
+            1)
+                download_sitl_models
+                ;;
+            2)
+                auto_fix_sitl
+                ;;
+            3)
+                auto_fix_gazebo
+                ;;
+            0)
+                break
+                ;;
+            *)
+                echo "Invalid option. Please enter 0, 1, 2, or 3."
+                ;;
+        esac
+    done
+}
 
-# If Gazebo configuration is valid, prompt user to select and launch a model/world
-if [ "$PLUGIN_OK" = true ] && [ "$RESOURCE_OK" = true ] && [ -n "$GAZEBO_DIR" ]; then
+# Function for Post-Launch Menu options when Gazebo is running
+post_launch_menu() {
+    while true; do
+        echo ""
+        echo "================================"
+        echo "Gazebo simulation running in separate terminal."
+        if [ -n "$SELECTED_DISPLAY" ]; then
+            echo "Current Model/World: $SELECTED_DISPLAY"
+        fi
+        echo "What would you like to do next?"
+        echo "================================"
+        echo "  1) Launch SITL (ArduPilot simulation vehicle) in a new terminal"
+        echo "  2) Continue to launch (Select & launch another Gazebo model)"
+        echo "  3) Fix menu (Download models, Fix SITL, Fix Gazebo paths)"
+        echo "  0) Exit"
+        echo "================================"
+        read -p "Select action [0-3]: " NEXT_ACTION
+        
+        case "$NEXT_ACTION" in
+            1)
+                launch_sitl
+                ;;
+            2)
+                select_and_launch_gazebo
+                break
+                ;;
+            3)
+                show_fix_menu
+                ;;
+            0)
+                echo "Exiting script."
+                exit 0
+                ;;
+            *)
+                echo "Invalid option. Please enter 0, 1, 2, or 3."
+                ;;
+        esac
+    done
+}
+
+# Function to select and launch a Gazebo model
+select_and_launch_gazebo() {
+    if [ "$PLUGIN_OK" != true ] || [ "$RESOURCE_OK" != true ] || [ -z "$GAZEBO_DIR" ]; then
+        echo "[WARNING] Gazebo setup or paths are not properly configured."
+        auto_fix_gazebo
+    fi
+
     WORLDS_DISPLAY=()
     WORLD_FILES=()
 
-    if [ -d "$GAZEBO_DIR/worlds" ]; then
+    if [ -n "$GAZEBO_DIR" ] && [ -d "$GAZEBO_DIR/worlds" ]; then
         for w in "$GAZEBO_DIR/worlds"/*.sdf; do
             [ -f "$w" ] || continue
             WORLDS_DISPLAY+=("[ardupilot_gazebo] $(basename "$w")")
@@ -500,21 +574,53 @@ if [ "$PLUGIN_OK" = true ] && [ "$RESOURCE_OK" = true ] && [ -n "$GAZEBO_DIR" ];
         done
     fi
 
-    if [ ${#WORLDS_DISPLAY[@]} -gt 0 ]; then
+    if [ ${#WORLDS_DISPLAY[@]} -eq 0 ]; then
+        echo "[WARNING] No world (.sdf) files found in Gazebo resource directories."
+        return 1
+    fi
+
+    local show_all=false
+
+    while true; do
         echo ""
         echo "================================"
         echo "Available Gazebo Simulation Models / Worlds:"
         echo "================================"
-        for i in "${!WORLDS_DISPLAY[@]}"; do
+
+        local total_models=${#WORLDS_DISPLAY[@]}
+        local limit=$total_models
+
+        if [ "$show_all" = false ] && [ $total_models -gt 6 ]; then
+            limit=6
+        fi
+
+        for (( i=0; i<limit; i++ )); do
             num=$((i+1))
             echo "  $num) ${WORLDS_DISPLAY[$i]}"
         done
-        echo "  0) Exit without launching"
-        echo "================================"
-        
-        read -p "Enter option number to launch Gazebo [1-${#WORLDS_DISPLAY[@]}]: " CHOICE
-        
-        if [[ "$CHOICE" =~ ^[0-9]+$ ]] && [ "$CHOICE" -ge 1 ] && [ "$CHOICE" -le "${#WORLDS_DISPLAY[@]}" ]; then
+
+        if [ "$show_all" = false ] && [ $total_models -gt 6 ]; then
+            echo "  7) Show more models ($((total_models - 6)) more available)"
+            echo "  0) Back to Main Menu"
+            echo "================================"
+            read -p "Enter option number [1-6 to launch, 7 for more, 0 to back]: " CHOICE
+        else
+            echo "  0) Back to Main Menu"
+            echo "================================"
+            read -p "Enter option number to launch Gazebo [1-$total_models, 0]: " CHOICE
+        fi
+
+        if [ "$show_all" = false ] && [ $total_models -gt 6 ] && [ "$CHOICE" = "7" ]; then
+            show_all=true
+            continue
+        fi
+
+        if [ "$CHOICE" = "0" ]; then
+            echo "Returning to main menu."
+            return 0
+        fi
+
+        if [[ "$CHOICE" =~ ^[0-9]+$ ]] && [ "$CHOICE" -ge 1 ] && [ "$CHOICE" -le "$limit" ]; then
             INDEX=$((CHOICE-1))
             SELECTED_WORLD="${WORLD_FILES[$INDEX]}"
             SELECTED_DISPLAY="${WORLDS_DISPLAY[$INDEX]}"
@@ -534,52 +640,55 @@ if [ "$PLUGIN_OK" = true ] && [ "$RESOURCE_OK" = true ] && [ -n "$GAZEBO_DIR" ];
             
             launch_in_new_terminal "$LAUNCH_CMD" "Gazebo Sim - $SELECTED_WORLD"
             
-            # Post-launch interactive options menu
-            while true; do
-                echo ""
-                echo "================================"
-                echo "Gazebo simulation running in separate terminal."
-                echo "What would you like to do next?"
-                echo "================================"
-                echo "  1) Launch SITL (ArduPilot simulation vehicle) in a new terminal"
-                echo "  2) Download / Update Official ArduPilot SITL_Models repository"
-                echo "  3) Automatically Fix / Setup SITL (Install prerequisites & build SITL)"
-                echo "  4) Automatically Fix Gazebo paths in ~/.bashrc"
-                echo "  0) Exit"
-                echo "================================"
-                read -p "Select action [0-4]: " NEXT_ACTION
-                
-                case "$NEXT_ACTION" in
-                    1)
-                        launch_sitl
-                        ;;
-                    2)
-                        download_sitl_models
-                        ;;
-                    3)
-                        auto_fix_sitl
-                        ;;
-                    4)
-                        auto_fix_gazebo
-                        ;;
-                    0)
-                        echo "Exiting script."
-                        break
-                        ;;
-                    *)
-                        echo "Invalid option. Please enter 0, 1, 2, 3, or 4."
-                        ;;
-                esac
-            done
-            
-        elif [ "$CHOICE" = "0" ]; then
-            echo "Exiting script without launching Gazebo."
+            # Open post-launch menu
+            post_launch_menu
+            return 0
         else
-            echo "Invalid selection or no input provided. Skipping Gazebo launch."
+            echo "Invalid selection. Please try again."
         fi
-    else
-        echo "No world (.sdf) files found in Gazebo resource directories."
-    fi
-fi
+    done
+}
+
+# Function for main menu after scan
+main_menu() {
+    while true; do
+        echo ""
+        echo "================================"
+        echo "Scan completed. Everything seems OK!"
+        echo "What would you like to do?"
+        echo "================================"
+        echo "  1) Launch Gazebo"
+        echo "  2) Download / Update official models from official repos (SITL_Models)"
+        echo "  3) Fix / Setup SITL (Install prerequisites & build SITL)"
+        echo "  4) Fix Gazebo paths in ~/.bashrc"
+        echo "  0) Exit"
+        echo "================================"
+        read -p "Select option [0-4]: " MAIN_CHOICE
+
+        case "$MAIN_CHOICE" in
+            1)
+                select_and_launch_gazebo
+                ;;
+            2)
+                download_sitl_models
+                ;;
+            3)
+                auto_fix_sitl
+                ;;
+            4)
+                auto_fix_gazebo
+                ;;
+            0)
+                echo "Exiting script."
+                exit 0
+                ;;
+            *)
+                echo "Invalid option. Please enter 0, 1, 2, 3, or 4."
+                ;;
+        esac
+    done
+}
+
+main_menu
 
 exec bash
